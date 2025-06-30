@@ -1,0 +1,40 @@
+# /addons/ha-wifi-gateway-addon/config.yaml
+name: "Wi-Fi to Ethernet Gateway (NAT)"
+version: "1.0.0"
+slug: "wifi_eth_gateway"
+description: "Shares the Pi's Wi-Fi connection out to the Ethernet port using NAT (atcs like Wi-Fi Client). This is a system-level service that directly configures host networking."
+url: "https://github.com/eximius313/ha-wifi-gateway-addon"
+arch: ["aarch64", "armv7", "amd64"]
+startup: "system"
+boot: "auto"
+init: false
+
+host_network: true
+host_dbus: true
+apparmor: true
+privileged:
+  - NET_ADMIN
+
+sysctls:
+  net.ipv4.ip_forward: 1
+
+options:
+  lan_interface: "end0"
+  wan_interface: "wlan0"
+  lan_address: "192.168.5.1"
+  lan_dhcp_start: "192.168.5.50"
+  lan_dhcp_end: "192.168.5.150"
+  lan_dns_servers:
+    - "1.1.1.1"
+    - "8.8.8.8"
+  verbose_logging: false
+
+schema:
+  lan_interface: str
+  wan_interface: str
+  lan_address: match(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)
+  lan_dhcp_start: match(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)
+  lan_dhcp_end: match(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)
+  lan_dns_servers:
+    - match(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)
+  verbose_logging: bool
