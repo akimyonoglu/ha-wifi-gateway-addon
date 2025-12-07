@@ -27,6 +27,15 @@ options:
   lan_dns_servers:
     - "1.1.1.1"
     - "8.8.8.8"
+  wifi_networks:
+    - ssid: "MyHomeWiFi"
+      password: "password123"
+      priority: 1
+    - ssid: "MyBackupWiFi"
+      password: "backup456"
+      priority: 2
+  scan_interval: 60
+  connection_check_interval: 10
   verbose_logging: false
 
 schema:
@@ -37,4 +46,10 @@ schema:
   lan_dhcp_end: match(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)
   lan_dns_servers:
     - match(^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$)
+  wifi_networks:
+    - ssid: str
+      password: str
+      priority: int(1,100)
+  scan_interval: int(10,3600)
+  connection_check_interval: int(5,300)
   verbose_logging: bool
