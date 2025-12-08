@@ -14,6 +14,7 @@ VERBOSE_LOGGING=$(bashio::config 'verbose_logging')
 # Global variable to track current connection
 CURRENT_WIFI_SSID=""
 CURRENT_WIFI_PRIORITY=999
+LAST_CONNECT_TIME=0
 
 # --- Wi-Fi Management Functions ---
 
@@ -113,10 +114,24 @@ connect_to_wifi() {
     if nmcli con up "wifi-gateway-${ssid}" ifname "$WAN_INTERFACE"; then
         CURRENT_WIFI_SSID="$ssid"
         CURRENT_WIFI_PRIORITY=$priority
+        LAST_CONNECT_TIME=$(date +%s)
         bashio::log.info "Successfully connected to $ssid"
 
-        # Wait for connection to stabilize
-        sleep 5
+        # Wait for connection to stabilize and DHCP to complete
+        sleep 10
+
+        # Wait for interface to get an IP address (up to 20 seconds)
+        local wait_count=0
+        while [[ $wait_count -lt 20 ]]; do
+            if ip addr show "$WAN_INTERFACE" | grep -q "inet "; then
+                local wan_ip=$(ip -4 addr show "$WAN_INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+                bashio::log.info "Wi-Fi interface has IP address: $wan_ip"
+                break
+            fi
+            sleep 1
+            wait_count=$((wait_count + 1))
+        done
+
         return 0
     else
         bashio::log.error "Failed to connect to $ssid"
@@ -133,13 +148,48 @@ is_wifi_connected() {
     # Check if the connection is active
     local state=$(nmcli -t -f STATE con show "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null | grep -o "activated")
 
-    if [[ "$state" == "activated" ]]; then
-        # Check if we can actually reach the internet (ping gateway or DNS)
-        if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
-            return 0
-        fi
+    if [[ "$state" != "activated" ]]; then
+        return 1
     fi
 
+    # Check if the interface has an IP address
+    if ! ip addr show "$WAN_INTERFACE" | grep -q "inet "; then
+        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+            bashio::log.debug "Wi-Fi interface has no IP address"
+        fi
+        return 1
+    fi
+
+    # Check if we can actually reach the internet
+    # First try ping (ICMP), then fallback to DNS resolution if ping is blocked
+    local ping_success=0
+    for i in 1 2 3; do
+        if ping -I "$WAN_INTERFACE" -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            ping_success=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ $ping_success -eq 1 ]]; then
+        return 0
+    fi
+
+    # Ping failed, try DNS resolution as fallback
+    if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+        bashio::log.debug "Ping failed, trying DNS resolution test..."
+    fi
+
+    if getent hosts google.com >/dev/null 2>&1; then
+        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+            bashio::log.debug "DNS resolution successful, connection is healthy"
+        fi
+        return 0
+    fi
+
+    if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+        bashio::log.debug "Wi-Fi connection health check failed (both ping and DNS)"
+    fi
     return 1
 }
 
@@ -149,6 +199,16 @@ wifi_monitor() {
 
     while true; do
         local current_time=$(date +%s)
+
+        # Grace period: Don't check health immediately after connecting (wait 30 seconds)
+        local time_since_connect=$((current_time - LAST_CONNECT_TIME))
+        if [[ $time_since_connect -lt 30 ]]; then
+            if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+                bashio::log.debug "In grace period after connection ($time_since_connect seconds), skipping health check"
+            fi
+            sleep "$CONNECTION_CHECK_INTERVAL"
+            continue
+        fi
 
         # Check current connection health
         if ! is_wifi_connected; then
