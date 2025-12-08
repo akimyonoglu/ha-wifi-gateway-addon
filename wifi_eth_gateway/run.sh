@@ -186,42 +186,24 @@ connect_to_wifi() {
 }
 
 # Check if current Wi-Fi connection is healthy
-# This uses a simple, reliable check: is NetworkManager reporting it as connected?
+# Simple and reliable: just check if interface has IP and route
 is_wifi_connected() {
     if [[ -z "$CURRENT_WIFI_SSID" ]]; then
-        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-            bashio::log.debug "No current SSID set"
-        fi
         return 1
     fi
 
-    # Check if the connection is active in NetworkManager
-    local state=$(nmcli -t -f STATE con show "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null | head -1)
-
-    if [[ "$state" != "activated" ]]; then
-        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-            bashio::log.debug "Connection state is '$state', not 'activated'"
-        fi
+    # Primary check: Does the interface have an IP address?
+    if ! ip addr show "$WAN_INTERFACE" 2>/dev/null | grep -q "inet "; then
         return 1
     fi
 
-    # Check if the interface has an IP address
-    if ! ip addr show "$WAN_INTERFACE" | grep -q "inet "; then
-        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-            bashio::log.debug "Wi-Fi interface has no IP address"
-        fi
+    # Secondary check: Does the interface have a default route?
+    if ! ip route show dev "$WAN_INTERFACE" 2>/dev/null | grep -q "^default"; then
         return 1
     fi
 
-    # Check if we have a default route via this interface
-    if ! ip route show dev "$WAN_INTERFACE" | grep -q "^default"; then
-        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-            bashio::log.debug "No default route via $WAN_INTERFACE"
-        fi
-        return 1
-    fi
-
-    # Connection is healthy if NetworkManager says so, we have an IP, and we have a route
+    # If we have an IP and a route, connection is healthy
+    # Don't rely on NetworkManager state as it can be flaky
     return 0
 }
 
@@ -232,10 +214,10 @@ wifi_monitor() {
     while true; do
         local current_time=$(date +%s)
 
-        # Grace period: Don't check health immediately after connecting (wait 90 seconds)
-        # This allows routing, NAT, and DHCP to fully stabilize
+        # Grace period: Don't check health immediately after connecting (wait 5 minutes)
+        # This allows routing, NAT, and DHCP to fully stabilize and prevents false positives
         local time_since_connect=$((current_time - LAST_CONNECT_TIME))
-        if [[ $time_since_connect -lt 90 ]]; then
+        if [[ $time_since_connect -lt 300 ]]; then
             if [[ "$VERBOSE_LOGGING" == "true" ]]; then
                 bashio::log.debug "In grace period after connection ($time_since_connect seconds), skipping health check"
             fi
@@ -250,9 +232,18 @@ wifi_monitor() {
             # Log diagnostic info
             if [[ "$VERBOSE_LOGGING" == "true" ]]; then
                 bashio::log.debug "Connection diagnostics:"
-                nmcli -t -f STATE,DEVICE con show "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null || bashio::log.debug "  Could not query connection state"
-                ip addr show "$WAN_INTERFACE" 2>/dev/null | grep "inet " || bashio::log.debug "  No IP address on $WAN_INTERFACE"
-                ip route show dev "$WAN_INTERFACE" 2>/dev/null || bashio::log.debug "  No routes for $WAN_INTERFACE"
+                local wan_ip=$(ip addr show "$WAN_INTERFACE" 2>/dev/null | grep "inet " | awk '{print $2}' | head -1)
+                if [[ -n "$wan_ip" ]]; then
+                    bashio::log.debug "  IP address: $wan_ip"
+                else
+                    bashio::log.debug "  No IP address"
+                fi
+                local wan_route=$(ip route show dev "$WAN_INTERFACE" 2>/dev/null | grep "^default")
+                if [[ -n "$wan_route" ]]; then
+                    bashio::log.debug "  Route: $wan_route"
+                else
+                    bashio::log.debug "  No default route"
+                fi
             fi
 
             CURRENT_WIFI_SSID=""
