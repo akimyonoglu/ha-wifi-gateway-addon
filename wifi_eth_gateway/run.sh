@@ -43,7 +43,7 @@ create_wifi_profiles() {
             wifi-sec.key-mgmt wpa-psk \
             wifi-sec.psk "$password" \
             autoconnect no \
-            connection.autoconnect-priority "$priority"
+            connection.autoconnect-priority "$priority" || true
 
         ((index++))
     done
@@ -62,7 +62,7 @@ scan_wifi_networks() {
     sleep 2
 
     # Get list of available SSIDs
-    nmcli -t -f SSID dev wifi list ifname "$WAN_INTERFACE" 2>/dev/null | sort -u
+    nmcli -t -f SSID dev wifi list ifname "$WAN_INTERFACE" 2>/dev/null | sort -u || true
 }
 
 # Get the best available Wi-Fi network based on priority
@@ -237,7 +237,7 @@ term_handler() {
   fi
 
   # Return LAN interface to NetworkManager control
-  nmcli dev set "$LAN_INTERFACE" managed yes
+  nmcli dev set "$LAN_INTERFACE" managed yes || true
 
   bashio::log.info "Graceful shutdown finished. Exiting."
   exit 0
