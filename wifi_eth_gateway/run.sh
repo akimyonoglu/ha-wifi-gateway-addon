@@ -305,8 +305,24 @@ setup_routing_isolation() {
     local RT_TABLE=100
     local RT_TABLE_NAME="wifi_gateway"
 
-    # Add custom routing table if not exists
-    if ! grep -q "^${RT_TABLE} ${RT_TABLE_NAME}$" /etc/iproute2/rt_tables 2>/dev/null; then
+    # Add custom routing table if not exists (create directory if needed)
+    if [[ ! -f /etc/iproute2/rt_tables ]]; then
+        mkdir -p /etc/iproute2
+        # Create rt_tables with default entries
+        cat > /etc/iproute2/rt_tables <<EOF
+#
+# reserved values
+#
+255     local
+254     main
+253     default
+0       unspec
+#
+# local
+#
+${RT_TABLE}     ${RT_TABLE_NAME}
+EOF
+    elif ! grep -q "^${RT_TABLE} ${RT_TABLE_NAME}$" /etc/iproute2/rt_tables; then
         echo "${RT_TABLE} ${RT_TABLE_NAME}" >> /etc/iproute2/rt_tables
     fi
 
