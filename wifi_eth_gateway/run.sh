@@ -24,7 +24,7 @@ create_wifi_profiles() {
     local index=0
     while true; do
         local ssid=$(bashio::config "wifi_networks[${index}].ssid" 2>/dev/null)
-        if [[ -z "$ssid" ]]; then
+        if [[ -z "$ssid" ]] || [[ "$ssid" == "null" ]]; then
             break
         fi
 
@@ -75,7 +75,7 @@ get_best_available_network() {
     local index=0
     while true; do
         local ssid=$(bashio::config "wifi_networks[${index}].ssid" 2>/dev/null)
-        if [[ -z "$ssid" ]]; then
+        if [[ -z "$ssid" ]] || [[ "$ssid" == "null" ]]; then
             break
         fi
 
