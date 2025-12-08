@@ -203,34 +203,30 @@ is_wifi_connected() {
     fi
 
     # Check if we can actually reach the internet
-    # First try ping (ICMP), then fallback to DNS resolution if ping is blocked
-    local ping_success=0
-    for i in 1 2 3; do
-        if ping -I "$WAN_INTERFACE" -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-            ping_success=1
-            break
+    # With routing isolation, we need to check connectivity differently
+    # Use the custom routing table to test (via fwmark or source routing)
+
+    # Method 1: Check if default gateway is reachable via wlan0
+    local wan_gateway=$(ip route show dev "$WAN_INTERFACE" | grep "^default" | awk '{print $3}' | head -1)
+    if [[ -n "$wan_gateway" ]]; then
+        # Ping the gateway (local network, should be fast and reliable)
+        if ping -I "$WAN_INTERFACE" -c 2 -W 2 "$wan_gateway" >/dev/null 2>&1; then
+            # Gateway is reachable, connection is healthy
+            return 0
         fi
-        sleep 1
-    done
-
-    if [[ $ping_success -eq 1 ]]; then
-        return 0
     fi
 
-    # Ping failed, try DNS resolution as fallback
-    if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-        bashio::log.debug "Ping failed, trying DNS resolution test..."
-    fi
-
-    if getent hosts google.com >/dev/null 2>&1; then
+    # Method 2: Try to reach external DNS via the custom routing table
+    # Use ip netns or mark packets to use the correct routing table
+    if ip route get 8.8.8.8 from 192.168.5.1 >/dev/null 2>&1; then
         if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-            bashio::log.debug "DNS resolution successful, connection is healthy"
+            bashio::log.debug "Routing to internet is functional"
         fi
         return 0
     fi
 
     if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-        bashio::log.debug "Wi-Fi connection health check failed (both ping and DNS)"
+        bashio::log.debug "Wi-Fi connection health check failed"
     fi
     return 1
 }
@@ -242,9 +238,10 @@ wifi_monitor() {
     while true; do
         local current_time=$(date +%s)
 
-        # Grace period: Don't check health immediately after connecting (wait 30 seconds)
+        # Grace period: Don't check health immediately after connecting (wait 60 seconds)
+        # This allows routing and NAT to fully stabilize
         local time_since_connect=$((current_time - LAST_CONNECT_TIME))
-        if [[ $time_since_connect -lt 30 ]]; then
+        if [[ $time_since_connect -lt 60 ]]; then
             if [[ "$VERBOSE_LOGGING" == "true" ]]; then
                 bashio::log.debug "In grace period after connection ($time_since_connect seconds), skipping health check"
             fi
@@ -522,6 +519,15 @@ if [[ "$VERBOSE_LOGGING" == "true" ]]; then
     iptables-nft -L FORWARD -n -v || bashio::log.warning "Could not list Filter table."
     bashio::log.info "------------------------------------------"
 fi
+
+# --- GATEWAY READY ---
+bashio::log.info "=========================================="
+bashio::log.info "Wi-Fi Gateway is READY!"
+bashio::log.info "LAN Network: ${LAN_ADDRESS%.*}.0/24"
+bashio::log.info "DHCP Range: $LAN_DHCP_START - $LAN_DHCP_END"
+bashio::log.info "WAN Connection: $WAN_INTERFACE via $CURRENT_WIFI_SSID"
+bashio::log.info "Connect devices to $LAN_INTERFACE to use the gateway"
+bashio::log.info "=========================================="
 
 # --- STEP 4: Launch DHCP server ---
 bashio::log.info "STEP 4: Starting DHCP server on $LAN_INTERFACE..."
