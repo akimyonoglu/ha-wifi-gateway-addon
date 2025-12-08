@@ -517,11 +517,11 @@ if [[ -n "$PIN_WIFI_NETWORK" ]] && [[ "$PIN_WIFI_NETWORK" != "null" ]]; then
     bashio::log.info "NetworkManager autoconnect is enabled for this network."
 
     # Wait for connection to establish (up to 60 seconds)
-    local wait_count=0
+    wait_count=0
     while [[ $wait_count -lt 60 ]]; do
         if nmcli -t -f STATE con show "wifi-gateway-${PIN_WIFI_NETWORK}" 2>/dev/null | grep -q "activated"; then
             # Get connection info
-            local wan_ip=$(ip -4 addr show "$WAN_INTERFACE" | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -1)
+            wan_ip=$(ip -4 addr show "$WAN_INTERFACE" | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -1)
             bashio::log.info "Connected to pinned network '$PIN_WIFI_NETWORK' (IP: ${wan_ip:-pending})"
             CURRENT_WIFI_SSID="$PIN_WIFI_NETWORK"
             LAST_CONNECT_TIME=$(date +%s)
