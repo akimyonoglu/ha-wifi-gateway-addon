@@ -45,7 +45,7 @@ create_wifi_profiles() {
             autoconnect no \
             connection.autoconnect-priority "$priority" || true
 
-        ((index++))
+        index=$((index + 1))
     done
 
     bashio::log.info "Created $index Wi-Fi network profiles"
@@ -89,7 +89,7 @@ get_best_available_network() {
             fi
         fi
 
-        ((index++))
+        index=$((index + 1))
     done
 
     if [[ -n "$best_ssid" ]]; then
