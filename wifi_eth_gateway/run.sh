@@ -174,6 +174,10 @@ connect_to_wifi() {
             wait_count=$((wait_count + 1))
         done
 
+        # Update routing table after connection (critical for reconnections)
+        bashio::log.info "Updating routing table for new connection..."
+        update_routing_table
+
         return 0
     else
         bashio::log.error "Failed to connect to $ssid"
@@ -182,15 +186,22 @@ connect_to_wifi() {
 }
 
 # Check if current Wi-Fi connection is healthy
+# This uses a simple, reliable check: is NetworkManager reporting it as connected?
 is_wifi_connected() {
     if [[ -z "$CURRENT_WIFI_SSID" ]]; then
+        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+            bashio::log.debug "No current SSID set"
+        fi
         return 1
     fi
 
-    # Check if the connection is active
-    local state=$(nmcli -t -f STATE con show "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null | grep -o "activated")
+    # Check if the connection is active in NetworkManager
+    local state=$(nmcli -t -f STATE con show "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null | head -1)
 
     if [[ "$state" != "activated" ]]; then
+        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+            bashio::log.debug "Connection state is '$state', not 'activated'"
+        fi
         return 1
     fi
 
@@ -202,33 +213,16 @@ is_wifi_connected() {
         return 1
     fi
 
-    # Check if we can actually reach the internet
-    # With routing isolation, we need to check connectivity differently
-    # Use the custom routing table to test (via fwmark or source routing)
-
-    # Method 1: Check if default gateway is reachable via wlan0
-    local wan_gateway=$(ip route show dev "$WAN_INTERFACE" | grep "^default" | awk '{print $3}' | head -1)
-    if [[ -n "$wan_gateway" ]]; then
-        # Ping the gateway (local network, should be fast and reliable)
-        if ping -I "$WAN_INTERFACE" -c 2 -W 2 "$wan_gateway" >/dev/null 2>&1; then
-            # Gateway is reachable, connection is healthy
-            return 0
-        fi
-    fi
-
-    # Method 2: Try to reach external DNS via the custom routing table
-    # Use ip netns or mark packets to use the correct routing table
-    if ip route get 8.8.8.8 from 192.168.5.1 >/dev/null 2>&1; then
+    # Check if we have a default route via this interface
+    if ! ip route show dev "$WAN_INTERFACE" | grep -q "^default"; then
         if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-            bashio::log.debug "Routing to internet is functional"
+            bashio::log.debug "No default route via $WAN_INTERFACE"
         fi
-        return 0
+        return 1
     fi
 
-    if [[ "$VERBOSE_LOGGING" == "true" ]]; then
-        bashio::log.debug "Wi-Fi connection health check failed"
-    fi
-    return 1
+    # Connection is healthy if NetworkManager says so, we have an IP, and we have a route
+    return 0
 }
 
 # Monitor and manage Wi-Fi connections
@@ -238,10 +232,10 @@ wifi_monitor() {
     while true; do
         local current_time=$(date +%s)
 
-        # Grace period: Don't check health immediately after connecting (wait 60 seconds)
-        # This allows routing and NAT to fully stabilize
+        # Grace period: Don't check health immediately after connecting (wait 90 seconds)
+        # This allows routing, NAT, and DHCP to fully stabilize
         local time_since_connect=$((current_time - LAST_CONNECT_TIME))
-        if [[ $time_since_connect -lt 60 ]]; then
+        if [[ $time_since_connect -lt 90 ]]; then
             if [[ "$VERBOSE_LOGGING" == "true" ]]; then
                 bashio::log.debug "In grace period after connection ($time_since_connect seconds), skipping health check"
             fi
@@ -252,6 +246,15 @@ wifi_monitor() {
         # Check current connection health
         if ! is_wifi_connected; then
             bashio::log.warning "Wi-Fi connection lost or unhealthy. Attempting reconnection..."
+
+            # Log diagnostic info
+            if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+                bashio::log.debug "Connection diagnostics:"
+                nmcli -t -f STATE,DEVICE con show "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null || bashio::log.debug "  Could not query connection state"
+                ip addr show "$WAN_INTERFACE" 2>/dev/null | grep "inet " || bashio::log.debug "  No IP address on $WAN_INTERFACE"
+                ip route show dev "$WAN_INTERFACE" 2>/dev/null || bashio::log.debug "  No routes for $WAN_INTERFACE"
+            fi
+
             CURRENT_WIFI_SSID=""
             CURRENT_WIFI_PRIORITY=999
 
@@ -293,6 +296,30 @@ wifi_monitor() {
 }
 
 # --- Routing Isolation Functions ---
+
+# Update routing table with current WAN gateway
+update_routing_table() {
+    local RT_TABLE=100
+
+    # Get the current gateway from WAN interface
+    local wan_gateway=$(ip route show dev "$WAN_INTERFACE" | grep "^default" | awk '{print $3}' | head -1)
+
+    # Flush and rebuild the custom routing table
+    ip route flush table $RT_TABLE 2>/dev/null || true
+
+    if [[ -n "$wan_gateway" ]]; then
+        ip route add default via "$wan_gateway" dev "$WAN_INTERFACE" table $RT_TABLE 2>/dev/null || true
+        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+            bashio::log.debug "Updated routing table: default via $wan_gateway dev $WAN_INTERFACE"
+        fi
+    else
+        # No specific gateway, use interface directly
+        ip route add default dev "$WAN_INTERFACE" table $RT_TABLE 2>/dev/null || true
+        if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+            bashio::log.debug "Updated routing table: default dev $WAN_INTERFACE"
+        fi
+    fi
+}
 
 # Setup source-based routing to isolate gateway traffic
 setup_routing_isolation() {
