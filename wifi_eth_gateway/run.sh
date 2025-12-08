@@ -124,7 +124,7 @@ connect_to_wifi() {
         local wait_count=0
         while [[ $wait_count -lt 20 ]]; do
             if ip addr show "$WAN_INTERFACE" | grep -q "inet "; then
-                local wan_ip=$(ip -4 addr show "$WAN_INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+                local wan_ip=$(ip -4 addr show "$WAN_INTERFACE" | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -1)
                 bashio::log.info "Wi-Fi interface has IP address: $wan_ip"
                 break
             fi
@@ -282,27 +282,41 @@ term_handler() {
 
   # Stop Wi-Fi monitor
   if [[ -n "$WIFI_MONITOR_PID" ]]; then
+    bashio::log.info "Stopping Wi-Fi monitor (PID: $WIFI_MONITOR_PID)..."
     kill "$WIFI_MONITOR_PID" 2>/dev/null || true
+    wait "$WIFI_MONITOR_PID" 2>/dev/null || true
   fi
 
-  # Stop dnsmasq
-  pkill dnsmasq
+  # Stop dnsmasq gracefully
+  bashio::log.info "Stopping dnsmasq..."
+  pkill -TERM dnsmasq 2>/dev/null || true
+  sleep 2
+  pkill -KILL dnsmasq 2>/dev/null || true
 
   # Clean up iptables rules
   cleanup
 
+  # Bring down LAN interface and flush its configuration
+  bashio::log.info "Restoring LAN interface ($LAN_INTERFACE)..."
+  ip addr flush dev "$LAN_INTERFACE" 2>/dev/null || true
+  ip link set "$LAN_INTERFACE" down 2>/dev/null || true
+
   # Disconnect from Wi-Fi
   if [[ -n "$CURRENT_WIFI_SSID" ]]; then
+    bashio::log.info "Disconnecting from Wi-Fi network: $CURRENT_WIFI_SSID..."
     nmcli con down "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null || true
   fi
 
   # Return LAN interface to NetworkManager control
-  nmcli dev set "$LAN_INTERFACE" managed yes || true
+  bashio::log.info "Returning LAN interface to NetworkManager..."
+  nmcli dev set "$LAN_INTERFACE" managed yes 2>/dev/null || true
 
-  bashio::log.info "Graceful shutdown finished. Exiting."
+  bashio::log.info "Graceful shutdown complete. Exiting."
   exit 0
 }
-trap 'term_handler' SIGTERM
+
+# Trap both SIGTERM (Docker stop) and SIGINT (Ctrl+C)
+trap 'term_handler' SIGTERM SIGINT
 
 # --- Main Script ---
 bashio::log.info "--- STARTING WI-FI GATEWAY ADD-ON ---"
@@ -310,7 +324,8 @@ if [[ "$VERBOSE_LOGGING" == "true" ]]; then bashio::log.info "Verbose logging is
 
 # --- STEP 0: ENSURE CLEAN STATE ---
 # Run cleanup first to remove any stale rules from a previous unclean shutdown.
-# cleanup
+bashio::log.info "STEP 0: Cleaning up any stale configuration from previous runs..."
+cleanup 2>/dev/null || bashio::log.info "No stale rules to clean up."
 
 # --- STEP 0.5: Setup Wi-Fi Profiles and Initial Connection ---
 bashio::log.info "STEP 0.5: Setting up Wi-Fi network profiles..."
@@ -381,4 +396,7 @@ if [[ "$VERBOSE_LOGGING" == "true" ]]; then DNSMASQ_LOG_FLAGS="--log-queries --l
 
 dnsmasq --interface="$LAN_INTERFACE" --dhcp-range="$LAN_DHCP_START","$LAN_DHCP_END",12h --dhcp-option=option:router,"$LAN_ADDRESS" $DNS_OPTIONS $DNSMASQ_LOG_FLAGS --no-daemon
 
-bashio::log.error "FATAL: DHCP server has stopped."
+# If we reach here, dnsmasq exited unexpectedly
+bashio::log.error "FATAL: DHCP server has stopped unexpectedly."
+bashio::log.warning "Performing cleanup before exit..."
+term_handler
