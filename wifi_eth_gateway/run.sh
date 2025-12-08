@@ -9,6 +9,7 @@ LAN_DHCP_END=$(bashio::config 'lan_dhcp_end')
 LAN_DNS_SERVERS=$(bashio::config 'lan_dns_servers')
 SCAN_INTERVAL=$(bashio::config 'scan_interval')
 CONNECTION_CHECK_INTERVAL=$(bashio::config 'connection_check_interval')
+PIN_WIFI_NETWORK=$(bashio::config 'pin_wifi_network')
 VERBOSE_LOGGING=$(bashio::config 'verbose_logging')
 
 # Global variable to track current connection
@@ -64,6 +65,13 @@ restore_wan_interface() {
 create_wifi_profiles() {
     bashio::log.info "Creating NetworkManager profiles for configured Wi-Fi networks..."
 
+    # Determine if we're in pinned mode
+    local is_pinned_mode=false
+    if [[ -n "$PIN_WIFI_NETWORK" ]] && [[ "$PIN_WIFI_NETWORK" != "null" ]]; then
+        is_pinned_mode=true
+        bashio::log.info "Pinned mode detected: Configuring autoconnect for '$PIN_WIFI_NETWORK' only"
+    fi
+
     local index=0
     while true; do
         local ssid=$(bashio::config "wifi_networks[${index}].ssid" 2>/dev/null)
@@ -77,15 +85,23 @@ create_wifi_profiles() {
         # Delete existing connection if it exists
         nmcli con delete "wifi-gateway-${ssid}" 2>/dev/null || true
 
+        # In pinned mode, only enable autoconnect for the pinned network
+        local autoconnect_setting="no"
+        if [[ "$is_pinned_mode" == "true" ]] && [[ "$ssid" == "$PIN_WIFI_NETWORK" ]]; then
+            autoconnect_setting="yes"
+            bashio::log.info "Creating profile for SSID: $ssid (Priority: $priority) [AUTOCONNECT ENABLED]"
+        else
+            bashio::log.info "Creating profile for SSID: $ssid (Priority: $priority)"
+        fi
+
         # Create new connection profile
-        bashio::log.info "Creating profile for SSID: $ssid (Priority: $priority)"
         nmcli con add type wifi \
             con-name "wifi-gateway-${ssid}" \
             ifname "$WAN_INTERFACE" \
             ssid "$ssid" \
             wifi-sec.key-mgmt wpa-psk \
             wifi-sec.psk "$password" \
-            autoconnect no \
+            autoconnect "$autoconnect_setting" \
             connection.autoconnect-priority "$priority" || true
 
         index=$((index + 1))
@@ -210,6 +226,22 @@ is_wifi_connected() {
 # Monitor and manage Wi-Fi connections
 wifi_monitor() {
     local last_scan=0
+
+    # Check if we're in pinned mode
+    if [[ -n "$PIN_WIFI_NETWORK" ]] && [[ "$PIN_WIFI_NETWORK" != "null" ]]; then
+        bashio::log.info "*** PINNED MODE ENABLED: Wi-Fi locked to '$PIN_WIFI_NETWORK' ***"
+        bashio::log.info "Using NetworkManager autoconnect - no health checks or monitoring needed"
+        bashio::log.info "NetworkManager will automatically maintain connection to '$PIN_WIFI_NETWORK'"
+
+        # In pinned mode, NetworkManager handles everything via autoconnect
+        # We just sleep forever - no monitoring needed
+        while true; do
+            sleep 3600  # Sleep for 1 hour at a time
+        done
+    fi
+
+    # Normal multi-network mode with health checks and failover
+    bashio::log.info "Multi-network mode: Health checks and failover enabled"
 
     while true; do
         local current_time=$(date +%s)
@@ -478,20 +510,61 @@ create_wifi_profiles
 # Claim exclusive control of WAN interface
 claim_wan_interface
 
-# Connect to the best available Wi-Fi network
-bashio::log.info "Attempting initial Wi-Fi connection..."
-best_network=$(get_best_available_network)
-if [[ -n "$best_network" ]]; then
-    ssid="${best_network%:*}"
-    priority="${best_network#*:}"
-    if connect_to_wifi "$ssid" "$priority"; then
-        bashio::log.info "Initial Wi-Fi connection established to $ssid"
-    else
-        bashio::log.error "Failed to establish initial Wi-Fi connection. Gateway may not function properly."
+# Connect to Wi-Fi network
+if [[ -n "$PIN_WIFI_NETWORK" ]] && [[ "$PIN_WIFI_NETWORK" != "null" ]]; then
+    # Pinned mode: NetworkManager autoconnect handles connection
+    bashio::log.info "Pinned mode: Waiting for NetworkManager to connect to '$PIN_WIFI_NETWORK'..."
+    bashio::log.info "NetworkManager autoconnect is enabled for this network."
+
+    # Wait for connection to establish (up to 60 seconds)
+    local wait_count=0
+    while [[ $wait_count -lt 60 ]]; do
+        if nmcli -t -f STATE con show "wifi-gateway-${PIN_WIFI_NETWORK}" 2>/dev/null | grep -q "activated"; then
+            # Get connection info
+            local wan_ip=$(ip -4 addr show "$WAN_INTERFACE" | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -1)
+            bashio::log.info "Connected to pinned network '$PIN_WIFI_NETWORK' (IP: ${wan_ip:-pending})"
+            CURRENT_WIFI_SSID="$PIN_WIFI_NETWORK"
+            LAST_CONNECT_TIME=$(date +%s)
+
+            # Wait a bit more for IP if needed
+            if [[ -z "$wan_ip" ]]; then
+                sleep 10
+                wan_ip=$(ip -4 addr show "$WAN_INTERFACE" | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -1)
+                if [[ -n "$wan_ip" ]]; then
+                    bashio::log.info "Wi-Fi interface has IP address: $wan_ip"
+                fi
+            fi
+
+            # Update routing table
+            bashio::log.info "Updating routing table for pinned connection..."
+            update_routing_table
+            break
+        fi
+        sleep 1
+        wait_count=$((wait_count + 1))
+    done
+
+    if [[ $wait_count -ge 60 ]]; then
+        bashio::log.warning "NetworkManager did not connect to '$PIN_WIFI_NETWORK' within 60 seconds"
+        bashio::log.warning "Gateway will continue - NetworkManager will keep trying to connect"
+        bashio::log.warning "If network is available, connection should establish shortly"
     fi
 else
-    bashio::log.error "No configured Wi-Fi networks are available. Cannot start gateway."
-    exit 1
+    # Multi-network mode: manually connect to best network
+    bashio::log.info "Attempting initial Wi-Fi connection..."
+    best_network=$(get_best_available_network)
+    if [[ -n "$best_network" ]]; then
+        ssid="${best_network%:*}"
+        priority="${best_network#*:}"
+        if connect_to_wifi "$ssid" "$priority"; then
+            bashio::log.info "Initial Wi-Fi connection established to $ssid"
+        else
+            bashio::log.error "Failed to establish initial Wi-Fi connection. Gateway may not function properly."
+        fi
+    else
+        bashio::log.error "No configured Wi-Fi networks are available. Cannot start gateway."
+        exit 1
+    fi
 fi
 
 # Start Wi-Fi monitoring in the background
