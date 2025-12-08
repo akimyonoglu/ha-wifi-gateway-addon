@@ -3,7 +3,7 @@ name: "Wi-Fi to Ethernet Gateway (NAT)"
 version: "1.0.0"
 slug: "wifi_eth_gateway"
 description: "Shares the Pi's Wi-Fi connection out to the Ethernet port using NAT (atcs like Wi-Fi Client). This is a system-level service that directly configures host networking."
-url: "https://github.com/eximius313/ha-wifi-gateway-addon"
+url: "https://github.com/akimyonoglu/ha-wifi-gateway-addon"
 arch: ["aarch64", "armv7", "amd64"]
 startup: "system"
 boot: "auto"
@@ -52,4 +52,5 @@ schema:
       priority: int(1,100)
   scan_interval: int(10,3600)
   connection_check_interval: int(5,300)
+
   verbose_logging: bool
