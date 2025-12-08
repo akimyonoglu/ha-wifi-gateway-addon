@@ -18,6 +18,48 @@ LAST_CONNECT_TIME=0
 
 # --- Wi-Fi Management Functions ---
 
+# Claim exclusive control of WAN interface by disabling other connections
+claim_wan_interface() {
+    bashio::log.info "Claiming exclusive control of $WAN_INTERFACE..."
+
+    # Store list of connections that were disabled for restoration later
+    DISABLED_CONNECTIONS=""
+
+    # Get all Wi-Fi connections that are NOT our gateway connections
+    local connections=$(nmcli -t -f NAME,TYPE,DEVICE con show | grep ":802-11-wireless:" | cut -d':' -f1 | grep -v "^wifi-gateway-")
+
+    if [[ -n "$connections" ]]; then
+        bashio::log.info "Disabling non-gateway Wi-Fi connections on $WAN_INTERFACE..."
+        while IFS= read -r con_name; do
+            if [[ -n "$con_name" ]]; then
+                # Check if this connection is on our WAN interface
+                local con_device=$(nmcli -t -f DEVICE con show "$con_name" 2>/dev/null)
+                if [[ "$con_device" == "$WAN_INTERFACE" ]]; then
+                    bashio::log.info "  Disconnecting and disabling autoconnect: $con_name"
+                    nmcli con down "$con_name" 2>/dev/null || true
+                    nmcli con mod "$con_name" connection.autoconnect no 2>/dev/null || true
+                    DISABLED_CONNECTIONS="${DISABLED_CONNECTIONS}${con_name}"$'\n'
+                fi
+            fi
+        done <<< "$connections"
+    fi
+
+    bashio::log.info "WAN interface $WAN_INTERFACE is now exclusively controlled by the gateway."
+}
+
+# Restore WAN interface to previous state
+restore_wan_interface() {
+    if [[ -n "$DISABLED_CONNECTIONS" ]]; then
+        bashio::log.info "Restoring non-gateway Wi-Fi connections..."
+        while IFS= read -r con_name; do
+            if [[ -n "$con_name" ]]; then
+                bashio::log.info "  Re-enabling autoconnect: $con_name"
+                nmcli con mod "$con_name" connection.autoconnect yes 2>/dev/null || true
+            fi
+        done <<< "$DISABLED_CONNECTIONS"
+    fi
+}
+
 # Create NetworkManager connection profiles for all configured Wi-Fi networks
 create_wifi_profiles() {
     bashio::log.info "Creating NetworkManager profiles for configured Wi-Fi networks..."
@@ -253,6 +295,70 @@ wifi_monitor() {
     done
 }
 
+# --- Routing Isolation Functions ---
+
+# Setup source-based routing to isolate gateway traffic
+setup_routing_isolation() {
+    bashio::log.info "Setting up routing isolation for gateway traffic..."
+
+    # Use routing table 100 for gateway traffic
+    local RT_TABLE=100
+    local RT_TABLE_NAME="wifi_gateway"
+
+    # Add custom routing table if not exists
+    if ! grep -q "^${RT_TABLE} ${RT_TABLE_NAME}$" /etc/iproute2/rt_tables 2>/dev/null; then
+        echo "${RT_TABLE} ${RT_TABLE_NAME}" >> /etc/iproute2/rt_tables
+    fi
+
+    # Flush the custom routing table
+    ip route flush table $RT_TABLE 2>/dev/null || true
+
+    # Add default route via WAN interface in the custom table
+    # This will be set once we get the gateway IP from DHCP
+    local wan_gateway=$(ip route show dev "$WAN_INTERFACE" | grep "^default" | awk '{print $3}' | head -1)
+    if [[ -n "$wan_gateway" ]]; then
+        ip route add default via "$wan_gateway" dev "$WAN_INTERFACE" table $RT_TABLE 2>/dev/null || true
+    else
+        # No specific gateway, just use the interface
+        ip route add default dev "$WAN_INTERFACE" table $RT_TABLE 2>/dev/null || true
+    fi
+
+    # Add rule: packets from LAN subnet should use the gateway routing table
+    local LAN_SUBNET="${LAN_ADDRESS%.*}.0/24"
+    ip rule del from $LAN_SUBNET lookup $RT_TABLE 2>/dev/null || true
+    ip rule add from $LAN_SUBNET lookup $RT_TABLE priority 100
+
+    # Add rule: packets with firewall mark should use the gateway routing table (for local NAT)
+    ip rule del fwmark 0x1 lookup $RT_TABLE 2>/dev/null || true
+    ip rule add fwmark 0x1 lookup $RT_TABLE priority 101
+
+    if [[ "$VERBOSE_LOGGING" == "true" ]]; then
+        bashio::log.info "--- [DEBUG] Routing Table $RT_TABLE_NAME ---"
+        ip route show table $RT_TABLE || bashio::log.warning "Could not show routing table"
+        bashio::log.info "--- [DEBUG] IP Rules ---"
+        ip rule show || bashio::log.warning "Could not show IP rules"
+    fi
+
+    bashio::log.info "Routing isolation configured."
+}
+
+# Cleanup routing isolation
+cleanup_routing_isolation() {
+    bashio::log.info "Cleaning up routing isolation..."
+
+    local RT_TABLE=100
+    local LAN_SUBNET="${LAN_ADDRESS%.*}.0/24"
+
+    # Remove IP rules
+    ip rule del from $LAN_SUBNET lookup $RT_TABLE 2>/dev/null || true
+    ip rule del fwmark 0x1 lookup $RT_TABLE 2>/dev/null || true
+
+    # Flush custom routing table
+    ip route flush table $RT_TABLE 2>/dev/null || true
+
+    bashio::log.info "Routing isolation cleanup complete."
+}
+
 # --- Robust Cleanup Function ---
 # This function uses `while` loops to delete every instance of our rules.
 # It runs until `iptables -C` (check) fails, meaning no more matching rules exist.
@@ -293,6 +399,9 @@ term_handler() {
   sleep 2
   pkill -KILL dnsmasq 2>/dev/null || true
 
+  # Clean up routing isolation
+  cleanup_routing_isolation
+
   # Clean up iptables rules
   cleanup
 
@@ -306,6 +415,9 @@ term_handler() {
     bashio::log.info "Disconnecting from Wi-Fi network: $CURRENT_WIFI_SSID..."
     nmcli con down "wifi-gateway-${CURRENT_WIFI_SSID}" 2>/dev/null || true
   fi
+
+  # Restore WAN interface Wi-Fi connections
+  restore_wan_interface
 
   # Return LAN interface to NetworkManager control
   bashio::log.info "Returning LAN interface to NetworkManager..."
@@ -325,11 +437,15 @@ if [[ "$VERBOSE_LOGGING" == "true" ]]; then bashio::log.info "Verbose logging is
 # --- STEP 0: ENSURE CLEAN STATE ---
 # Run cleanup first to remove any stale rules from a previous unclean shutdown.
 bashio::log.info "STEP 0: Cleaning up any stale configuration from previous runs..."
-cleanup 2>/dev/null || bashio::log.info "No stale rules to clean up."
+cleanup_routing_isolation 2>/dev/null || bashio::log.info "No stale routing rules to clean up."
+cleanup 2>/dev/null || bashio::log.info "No stale iptables rules to clean up."
 
 # --- STEP 0.5: Setup Wi-Fi Profiles and Initial Connection ---
 bashio::log.info "STEP 0.5: Setting up Wi-Fi network profiles..."
 create_wifi_profiles
+
+# Claim exclusive control of WAN interface
+claim_wan_interface
 
 # Connect to the best available Wi-Fi network
 bashio::log.info "Attempting initial Wi-Fi connection..."
@@ -369,6 +485,10 @@ if [[ "$VERBOSE_LOGGING" == "true" ]]; then
     ip addr show "$LAN_INTERFACE" || bashio::log.warning "Could not get status for $LAN_INTERFACE"
     bashio::log.info "----------------------------------------------------"
 fi
+
+# --- STEP 2.5: Setup Routing Isolation ---
+bashio::log.info "STEP 2.5: Configuring routing isolation..."
+setup_routing_isolation
 
 # --- STEP 3: Configure Firewall ---
 bashio::log.info "STEP 3: Configuring Firewall Policy and Rules..."
